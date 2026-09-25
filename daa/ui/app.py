@@ -60,7 +60,7 @@ def _fetch_external_scramble() -> str:
         return ""
 
 
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=2.0)
 def _poll_external_scramble() -> None:
     """Live-sync the 3D page's case into this app (no reload, no resets)."""
     value = _fetch_external_scramble()

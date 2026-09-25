@@ -116,14 +116,19 @@
   </div>
 
   <div id="viewDaa" class="view-pane hidden">
+    <p class="muted small">
+      The dashboard runs from <code>streamlit run daa/ui/app.py</code>
+      (<code>127.0.0.1:8501</code>).  If the frame below stays blank or keeps
+      loading, the Streamlit app is not reachable from this page — use the
+      button below (opens in a new tab).
+    </p>
+    <p>
+      <a id="daaOpenBig" class="mode-btn" href="http://127.0.0.1:8501"
+         target="_blank" rel="noopener">Open dashboard in a new tab ↗</a>
+    </p>
     <iframe id="daaFrame" class="daa-frame" src="about:blank"
             title="DAA comparative study dashboard"
             aria-label="Streamlit DAA dashboard"></iframe>
-    <p class="muted small">
-      The dashboard runs from <code>streamlit run daa/ui/app.py</code>
-      (<code>127.0.0.1:8501</code>).  If the frame stays blank, the app is not
-      running — start it, then reload.
-    </p>
   </div>
 </div>
 
@@ -142,6 +147,39 @@
   window.setTimeout(() => {
     if (!playerRefsOk()) bootstrapMain();
   }, 4000);
+
+  // The DAA Study tab must work regardless of cubing.js boot state: the tab
+  // buttons call `switchMode(...)` inline, so it lives at module scope, not
+  // inside main(). The dashboard URL derives from the host the page was
+  // opened on, so it also works under port forwarding / a LAN IP, not just
+  // literal 127.0.0.1. The iframe loads lazily (each entry to DAA mode forces
+  // a fresh load) - an eagerly-preloaded hidden iframe gets throttled by the
+  // browser (battery saver / background-tab throttling) and can sit on the
+  // Streamlit spinner forever.
+  const DAA_DASHBOARD_URL = "http://" + window.location.hostname + ":8501";
+  const daaFrame = document.getElementById("daaFrame");
+  const daaOpen = document.getElementById("daaOpen");
+  const daaOpenBig = document.getElementById("daaOpenBig");
+  if (daaOpen) daaOpen.href = DAA_DASHBOARD_URL;
+  if (daaOpenBig) daaOpenBig.href = DAA_DASHBOARD_URL;
+  window.switchMode = function (mode) {
+    const is3d = mode === "3d";
+    document.getElementById("view3d").classList.toggle("hidden", !is3d);
+    document.getElementById("viewDaa").classList.toggle("hidden", is3d);
+    document.getElementById("mode3d").classList.toggle("active", is3d);
+    document.getElementById("modeDaa").classList.toggle("active", !is3d);
+    document.getElementById("mode3d").setAttribute("aria-selected", String(is3d));
+    document.getElementById("modeDaa").setAttribute("aria-selected", String(!is3d));
+    const frame = document.getElementById("daaFrame");
+    if (!is3d && frame) {
+      // Reload the dashboard on every entry: guarantees a fresh connection
+      // instead of a stale, throttled or half-connected Streamlit session.
+      frame.src = DAA_DASHBOARD_URL;
+    }
+    // Entering DAA mode re-pushes the current case so the study is fresh even
+    // if no Random/typing happened while the view was hidden ("no auto-switch").
+    if (window.pushScrambleToDaa) window.pushScrambleToDaa();
+  };
 
   let booted = false;
   function playerRefsOk() {
@@ -163,6 +201,7 @@
   let controlsReady = false;
   let loadedAlgo = "physical"; // algorithm that produced the loaded solution
   let noSolutionMsg = null;    // honest "algorithm hit its limits" notice
+  let solveDeferred = false;   // a mid-scramble Solve is queued (attached at scramble end)
 
   const el = {
     scrambleText: document.getElementById("scrambleText"),
@@ -208,6 +247,11 @@
 
   function statusFor(s) {
     if (noSolutionMsg) return noSolutionMsg;
+    // During solution playback the wrapper's step index stays frozen at the
+    // scramble end, so label it SOLVING explicitly instead of "press SOLVE".
+    if (s.playing && s.step === s.scrambleLength && s.scrambleLength < s.total) {
+      return "SOLVING… (optimal IDA* solution)";
+    }
     if (s.phase === "solved" && s.step === 0 && s.total === 0) return "Ready — enter a scramble and press SOLVE.";
     if (s.phase === "solved" && s.step === 0) return "Solved cube — press SOLVE to run the scramble.";
     if (s.phase === "scramble") return s.playing ? "SCRAMBLING…" : "SCRAMBLED — press SOLVE.";
@@ -216,6 +260,7 @@
   }
 
   sim.onStateChange = (s) => {
+    if (!s.playing && s.step >= s.total) solveDeferred = false;
     el.stepText.textContent = s.step + "/" + s.total;
     el.curMove.textContent = s.currentMove ?? "–";
     el.scrambleText.textContent = s.seq.length
@@ -235,7 +280,9 @@
     });
 
     el.phaseText.textContent =
-      s.phase === "solved" ? "SOLVED" : s.phase === "scramble" ? "SCRAMBLE" : "SOLVING";
+      s.playing && s.step === s.scrambleLength && s.scrambleLength < s.total
+        ? "SOLVING"
+        : s.phase === "solved" ? "SOLVED" : s.phase === "scramble" ? "SCRAMBLE" : "SOLVING";
 
     const st = statusFor(s);
     el.status.textContent = st;
@@ -290,6 +337,18 @@
     buttons.solve.disabled = true;
     try {
       const certainScramble = moves.join(" ");
+      // Idempotency: ignore extra SOLVE presses (double-click / Enter / algo
+      // change / a click while the solution is already animating) instead of
+      // re-registering a second continuation or rebuilding the timeline — a
+      // rebuild would flash the cube back to solved and replay the scramble
+      // (the "it solves, then solves again" look).
+      if (solveDeferred ||
+          (sim.playing && sim.getCurrentStep() > sim.scramble.length) ||
+          (sim.playing && sim.solution.length > 0 &&
+           sim.scramble.join(" ") === certainScramble)) {
+        buttons.solve.disabled = false;
+        return;
+      }
       const atEnd = sim.getCurrentStep() >= sim.getTotalSteps();
 
       // Case A — the cube is ALREADY physically showing exactly this scramble
@@ -297,12 +356,16 @@
       // playback.  The timeline already contains scramble+solution, so nothing
       // needs rebuilding and no colour flash occurs at this moment.
       const algoNow = el.algoSelect.value;
+      const pendingSol =
+        Array.isArray(window._pendingSolve) &&
+        window._pendingSolve[0] === certainScramble &&
+        window._pendingSolve[1] === algoNow
+          ? window._pendingSolve[2]
+          : null;
       const resumable =
         sim.getCurrentStep() === sim.scramble.length &&
         sim.scramble.join(" ") === certainScramble &&
-        Array.isArray(window._pendingSolve) &&
-        window._pendingSolve[0] === certainScramble &&
-        window._pendingSolve[1] === algoNow &&
+        pendingSol &&
         sim.solution.length > 0;
 
       // Case B — the cube is already SOLVED for exactly this same scramble and
@@ -316,10 +379,33 @@
         sim.scramble.join(" ") === certainScramble &&
         loadedAlgo === algoNow;
 
-      const data = resumable || alreadySolved
-        ? (Array.isArray(window._pendingSolve) && window._pendingSolve[0] === certainScramble
-            ? window._pendingSolve[2]
-            : null)
+      // Case C — the cube is paused on EXACTLY this scramble (Random's playback
+      // finished) and a matching solution was prefetched but never attached,
+      // because it arrived while the scramble was still animating (when
+      // randomScramble skips the rebuild and sim.solution stays empty).
+      // Attach it at the CURRENT pose and play ONLY the solution — no reset,
+      // no re-scramble, no flash.
+      const attachable =
+        !resumable &&
+        !alreadySolved &&
+        !!pendingSol &&
+        pendingSol.found !== false &&
+        pendingSol.solution &&
+        sim.getCurrentStep() === sim.scramble.length &&
+        sim.scramble.join(" ") === certainScramble &&
+        sim.solution.length === 0;
+
+      // Case D — the cube is showing (or is still animating) EXACTLY this
+      // scramble and no solution is attached yet.  Used to decide whether a
+      // Solve can safely run the solution from the CURRENT pose without
+      // rebuilding the timeline (the mid-scramble / paused-at-end cases).
+      const scramblePose =
+        sim.scramble.length > 0 &&
+        sim.scramble.join(" ") === certainScramble &&
+        sim.solution.length === 0;
+
+      const data = resumable || alreadySolved || attachable || (pendingSol && scramblePose)
+        ? pendingSol
         : await (async () => {
             const res = await fetch("/solve?scramble=" + encodeURIComponent(certainScramble) + "&algo=" + encodeURIComponent(algoNow));
             const d = await res.json();
@@ -338,8 +424,67 @@
 
       if (resumable) {
         // Continue from the paused scrambled pose straight into the solution.
+        // Route through playSolution() (re-scrub + play) rather than a bare
+        // play(): on a timeline that is already paused mid-way with the full
+        // scramble+solution alg set, a direct play() was observed to no-op
+        // (the model never starts), whereas the goToStep+pause+play sequence
+        // provably resumes.  playSolution() is safe here because resume
+        // requires exactly stepIndex === scramble.length.
         window._pendingSolve = null;
-        sim.play();
+        sim.playSolution();
+      } else if (attachable) {
+        // Prefetched solution landed while the scramble was still playing and
+        // was never attached.  Extend the timeline from the CURRENT scrambled
+        // pose and play only the solution moves.
+        window._pendingSolve = null;
+        loadedAlgo = algoNow;
+        sim.onDone(null);
+        sim.load(sim.scramble, pendingSol.solution.split(" "), sim.getCurrentStep());
+        sim.playSolution();
+      } else if (scramblePose) {
+        // The cube is playing or paused on exactly this scramble with no
+        // solution attached.  NEVER rebuild/reset the timeline here — that
+        // jumps the state back to solved and re-scrambles from the start (the
+        // "the face changed on Solve" bug).  If the scramble is still
+        // animating, defer: attach the solution when it finishes and play only
+        // the solve, uninterrupted.  If it is already paused on the scrambled
+        // pose, attach and solve right there.
+        window._pendingSolve = null;
+        loadedAlgo = algoNow;
+        const solMoves = data ? (data.solution ? data.solution.split(" ") : []) : [];
+        if (!solMoves.length) {
+          if (data && data.found === false) {
+            const failed = (algoNow || "").toLowerCase();
+            const alternatives = ["physical solver", "Bidirectional", "A*", "Greedy"].filter(
+              (label) => (label === "physical solver" ? "physical" : label).toLowerCase() !== failed
+            );
+            const tip = alternatives.length
+              ? "try " + alternatives.join(", ") + ", or a shorter scramble."
+              : "try a shorter scramble or another algorithm.";
+            noSolutionMsg =
+              "No solution within limits (" + (data.reason || "resource limit reached") + ") — " +
+              (data.nodes != null ? Number(data.nodes).toLocaleString("en-US") : "?") + " nodes, " +
+              (data.time_s != null ? Math.round(data.time_s * 1000) + " ms" : "?") +
+              ". This search honestly exhausted its budget without solving (limits are enforced, " +
+              "nothing is fabricated). The cube is left scrambled — " + tip;
+            el.status.className = "status warn";
+          }
+          return;
+        }
+        const attachAndSolve = () => {
+          solveDeferred = false;
+          sim.pause();
+          if (sim.solution.length === 0) {
+            sim.load(sim.scramble, solMoves, sim.getCurrentStep());
+          }
+          sim.playSolution();
+        };
+        if (sim.playing) {
+          solveDeferred = true;
+          sim.onDone(attachAndSolve);
+        } else {
+          attachAndSolve();
+        }
       } else if (!alreadySolved) {
         // Fresh scramble (typed or different algorithm): build the single
         // timeline once and animate the whole scramble -> solve continuously.
@@ -377,6 +522,7 @@
   async function randomScramble() {
     clearError();
     noSolutionMsg = null;
+    solveDeferred = false;
     try {
       const res = await fetch("/scramble?length=12");
       const data = await res.json();
@@ -409,6 +555,18 @@
           if (sol.found !== false && !sim.playing &&
               sim.getTotalSteps() > 0 && sim.getCurrentStep() >= sim.getTotalSteps()) {
             sim.load(moves, sol.solution.split(" "), sim.getCurrentStep());
+          } else if (sol.found !== false && sim.playing &&
+                     sim.scramble.join(" ") === data.scramble && sim.solution.length === 0) {
+            // The solution landed while the scramble is still animating: do NOT
+            // rebuild mid-motion.  Attach it quietly once the scramble playback
+            // ends, so Solve can later just resume from the scrambled pose with
+            // no re-scramble and no flash.
+            sim.onDone(() => {
+              sim.pause();
+              if (sim.solution.length === 0) {
+                sim.load(sim.scramble, sol.solution.split(" "), sim.getCurrentStep());
+              }
+            });
           }
           el.sBfs.textContent = sol.bfs_length;
           el.sLen.textContent = sol.found !== false ? sol.length : "–";
@@ -465,22 +623,6 @@
     });
   });
   }
-
-  window.switchMode = function (mode) {
-    const is3d = mode === "3d";
-    document.getElementById("view3d").classList.toggle("hidden", !is3d);
-    document.getElementById("viewDaa").classList.toggle("hidden", is3d);
-    document.getElementById("mode3d").classList.toggle("active", is3d);
-    document.getElementById("modeDaa").classList.toggle("active", !is3d);
-    document.getElementById("mode3d").setAttribute("aria-selected", String(is3d));
-    document.getElementById("modeDaa").setAttribute("aria-selected", String(!is3d));
-    if (!is3d && document.getElementById("daaFrame").getAttribute("src") === "about:blank") {
-      document.getElementById("daaFrame").src = "http://127.0.0.1:8501";
-    }
-    // Entering DAA mode re-pushes the current case so the study is fresh even
-    // if no Random/typing happened while the view was hidden ("no auto-switch").
-    if (window.pushScrambleToDaa) window.pushScrambleToDaa();
-  };
 </script>
 </body>
 </html>

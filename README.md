@@ -7,10 +7,23 @@ python -m venv venv
 # Windows: venv\Scripts\activate    |    Unix: source venv/bin/activate
 pip install -r requirements.txt
 
+python run_app.py                          # starts BOTH servers with auto-restart
+```
+
+Then open **http://127.0.0.1:5000** (the 3D page embeds the dashboard under the
+"DAA Study" tab; the dashboard also runs standalone at http://127.0.0.1:8501).
+`run_app.py` health-checks every 3 s and revives any server that dies (logs in
+`.run_app_flask.log` / `.run_app_streamlit.log`). To run/nag them manually:
+
+```bash
 python viz/app.py                          # Web app (3D solver + API)  → http://127.0.0.1:5000
-python -m streamlit run daa/ui/app.py --server.port=8501   # DAA study dashboard → http://127.0.0.1:8501
+python -m streamlit run daa/ui/app.py --server.port=8501 --server.address=127.0.0.1  # DAA dashboard → http://127.0.0.1:8501
 python -m pytest solver/tests daa/tests -q # run the test suite (109 tests)
 ```
+
+The `--server.address=127.0.0.1` binds the dashboard to the stable IPv4 loopback so it keeps
+answering even when the Wi-Fi/hotspot network blips (an IPv6 dual-stack bind dies with
+`WinError 64` on this machine and the page hangs on "loading").
 
 The 3D page embeds the dashboard (tab "DAA Study"); the dashboard also runs standalone at
 127.0.0.1:8501. The BFS distance table auto-builds on first use (~6-7 min) and is cached.

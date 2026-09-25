@@ -156,6 +156,11 @@ export class CubeSimulation {
       if (self._fallbackOnly) { self._startFallback(); return; }
       try {
         self.playing = true;
+        // The synchronous emit from play() above reports playing=false (the
+        // flag flips inside this queued task); re-emit now so the UI reflects
+        // "SCRAMBLING…" / "SOLVING…" for the whole animation, not a stale
+        // paused label ("press SOLVE…") that invites a redundant Solve press.
+        self._emit();
         await self._playTimeline();
         self._startPoll();
         self._startSafety();
@@ -232,10 +237,17 @@ export class CubeSimulation {
   getCurrentStep() { return this.stepIndex; }
   getTotalSteps() { return this._fullSequence().length; }
 
-  // Callback fires once after a completed play/playScramble/playSolution
+  // Callbacks fire once after a completed play/playScramble/playSolution
   // animation (used to chain "scramble -> then solve" without cooking
-  // wall-clock timings).
-  onDone(next) { this._afterPlaying = next; return this; }
+  // wall-clock timings). Multiple continuations are allowed (e.g. Random's
+  // prefetch may register a late-solution attach AND the user may have
+  // deferred a Solve). Pass null to clear all pending continuations.
+  onDone(next) {
+    if (next === null) { this._afterPlaying = []; return this; }
+    if (!Array.isArray(this._afterPlaying)) this._afterPlaying = [];
+    this._afterPlaying.push(next);
+    return this;
+  }
 
   // -- state accessors ------------------------------------------------------
   currentMove() {
@@ -305,10 +317,12 @@ export class CubeSimulation {
     this.stepIndex = this._fullSequence().length;
     this._stopPoll();
     this._stopSafety();
-    const cb = this._afterPlaying;
-    this._afterPlaying = null;
+    const cbs = this._afterPlaying || [];
+    this._afterPlaying = [];
     this._emit();
-    if (cb) cb.call(this);
+    for (const cb of cbs) {
+      try { cb.call(this); } catch (_) {}
+    }
   }
 
   _startFallback() {
