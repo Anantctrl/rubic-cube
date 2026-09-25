@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>2x2x2 Optimal Cube Solver</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>2×2×2 Rubik's Cube — Optimal Solver &amp; 3D Simulation</h1>
+  <p class="subtitle">
+    Physical solver in cubing.js's own 2×2×2 move basis (BFS full-graph distance
+    table, 3,674,160 states, diameter 11, as the admissible heuristic). The cube
+    below is a <i>real</i> 3D simulation: every scramble and solution move
+    physically turns the layer — one at a time.  Switch to the <b>DAA Study</b>
+    mode for the comparative analysis dashboard.
+  </p>
+
+  <div class="mode-bar" role="tablist">
+    <button id="mode3d" type="button" class="mode-btn active" role="tab" aria-selected="true"
+            onclick="switchMode('3d')">▧ 3D Solver</button>
+    <button id="modeDaa" type="button" class="mode-btn" role="tab" aria-selected="false"
+            onclick="switchMode('daa')">▣ DAA Study</button>
+    <span class="mode-hint" id="daaHint">
+      Streamlit dashboard on <code>127.0.0.1:8501</code>.
+      <a id="daaOpen" href="http://127.0.0.1:8501" target="_blank" rel="noopener">Open in a new tab ↗</a>
+    </span>
+  </div>
+
+  <div id="view3d" class="view-pane">
+  <div class="grid">
+    <!-- Row 1 / col 1: the 3D cube -->
+    <div class="panel">
+      <div class="cube-wrap">
+        <twisty-player
+          id="cube"
+          puzzle="2x2x2"
+          visualization="3D"
+          background="none"
+          control-panel="none"
+          hint-facelets="floating"></twisty-player>
+      </div>
+      <div id="cdnWarning">cubing.js CDN did not load — check your internet connection and refresh.</div>
+    </div>
+
+    <!-- Row 1 / col 2: scramble + solution + solver info -->
+    <div class="panel">
+      <div class="input-row">
+        <input id="scramble" placeholder="Enter a scramble, e.g. R U R' U'" spellcheck="false" autocomplete="off">
+        <button id="randomBtn" type="button">Random</button>
+        <button id="solveBtn" type="button" class="primary">Solve</button>
+      </div>
+
+      <div class="section-title">Scramble</div>
+      <div id="scrambleText" class="alg-line empty">none</div>
+
+      <div class="section-title">Solution (click a move to jump)</div>
+      <div id="chips" class="chips"></div>
+
+      <div class="section-title">Solver</div>
+      <div class="algo-row">
+        <span class="k">Algorithm</span>
+        <select id="algoSelect" class="algo-select" title="Choose which solver to run">
+          <option value="physical">BFS + IDA* (physical, optimal)</option>
+          <option value="BFS">BFS (DAA, optimal)</option>
+          <option value="IDDFS">IDDFS (DAA, optimal)</option>
+          <option value="Bidirectional">Bidirectional (DAA, optimal)</option>
+          <option value="A*">A* (DAA, admissible h)</option>
+          <option value="Greedy">Greedy Best-First (DAA)</option>
+          <option value="Branch &amp; Bound">Branch &amp; Bound (DAA)</option>
+          <option value="DFS">DFS (DAA)</option>
+          <option value="DLS">Depth-Limited Search (DAA)</option>
+          <option value="Backtracking">Backtracking (DAA)</option>
+        </select>
+      </div>
+      <div class="solver-stats">
+        <span class="k">Solved by</span><span class="v" id="sAlgo">BFS + IDA* (physical)</span>
+        <span class="k">BFS distance</span><span class="v" id="sBfs">–</span>
+        <span class="k">Solution length</span><span class="v" id="sLen">–</span>
+        <span class="k">Nodes explored</span><span class="v" id="sNodes">–</span>
+        <span class="k">Search time</span><span class="v" id="sTime">–</span>
+        <span class="k">Optimal</span><span class="v" id="sOpt">–</span>
+      </div>
+
+      <div class="step-card">
+        <div class="big"><span id="curMove">–</span></div>
+        <div>
+          <div>Step <span id="stepText">0/0</span></div>
+          <div class="ph" id="phaseText">READY</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="resetBtn" type="button">RESET</button>
+        <button id="startBtn" type="button">|&lt; START</button>
+        <button id="prevBtn" type="button">&lt; PREVIOUS</button>
+        <button id="nextBtn" type="button">NEXT &gt;</button>
+        <button id="endBtn" type="button">SOLVED &gt;|</button>
+        <button id="playBtn" type="button" class="primary">▶ PLAY</button>
+        <button id="pauseBtn" type="button">❚❚ PAUSE</button>
+      </div>
+
+      <div class="speed">
+        Speed:
+        <button type="button" data-speed="0.5">0.5×</button>
+        <button type="button" data-speed="1" class="active">1×</button>
+        <button type="button" data-speed="2">2×</button>
+      </div>
+
+      <div id="status" class="status">Ready — enter a scramble and press SOLVE.</div>
+      <div id="errorBox" class="error-box hidden"></div>
+    </div>
+  </div>
+  </div>
+
+  <div id="viewDaa" class="view-pane hidden">
+    <iframe id="daaFrame" class="daa-frame" src="about:blank"
+            title="DAA comparative study dashboard"
+            aria-label="Streamlit DAA dashboard"></iframe>
+    <p class="muted small">
+      The dashboard runs from <code>streamlit run daa/ui/app.py</code>
+      (<code>127.0.0.1:8501</code>).  If the frame stays blank, the app is not
+      running — start it, then reload.
+    </p>
+  </div>
+</div>
+
+<script type="module" src="https://cdn.cubing.net/v0/js/cubing/twisty"></script>
+<script type="module">
+  import { CubeSimulation } from "./simulation.js";
+
+  const VALID = new Set("U U' U2 D D' D2 L L' L2 R R' R2 F F' F2 B B' B2".split(" "));
+
+  // Module scripts do not wait for each other: the <twisty-player> custom
+  // element must be upgraded by cubing.js before the controller can set the
+  // ``alg`` property, otherwise it silently becomes a plain expando.
+  customElements.whenDefined("twisty-player")
+    .then(() => bootstrapMain())
+    .catch(() => {});
+  window.setTimeout(() => {
+    if (!playerRefsOk()) bootstrapMain();
+  }, 4000);
+
+  let booted = false;
+  function playerRefsOk() {
+    const player = document.getElementById("cube");
+    return !!(player && player.timeline && typeof player.timeline.scrubTo === "function");
+  }
+
+  function bootstrapMain() {
+    if (booted) return;
+    booted = true;
+    main();
+  }
+
+  function main() {
+  const player = document.getElementById("cube");
+  const input = document.getElementById("scramble");
+  const sim = new CubeSimulation(player);
+
+  let controlsReady = false;
+  let loadedAlgo = "physical"; // algorithm that produced the loaded solution
+  let noSolutionMsg = null;    // honest "algorithm hit its limits" notice
+
+  const el = {
+    scrambleText: document.getElementById("scrambleText"),
+    chips: document.getElementById("chips"),
+    curMove: document.getElementById("curMove"),
+    stepText: document.getElementById("stepText"),
+    phaseText: document.getElementById("phaseText"),
+    status: document.getElementById("status"),
+    errorBox: document.getElementById("errorBox"),
+    sBfs: document.getElementById("sBfs"),
+    sLen: document.getElementById("sLen"),
+    sNodes: document.getElementById("sNodes"),
+    sOpt: document.getElementById("sOpt"),
+    sTime: document.getElementById("sTime"),
+    sAlgo: document.getElementById("sAlgo"),
+    algoSelect: document.getElementById("algoSelect"),
+  };
+
+  const ALGO_LABELS = {
+    physical: "BFS + IDA* (physical)",
+    BFS: "BFS",
+    IDDFS: "IDDFS",
+    Bidirectional: "Bidirectional",
+    "A*": "A*",
+    Greedy: "Greedy Best-First",
+    "Branch & Bound": "Branch &amp; Bound",
+    DFS: "DFS",
+    DLS: "Depth-Limited Search",
+    Backtracking: "Backtracking",
+  };
+
+  const buttons = {
+    play: document.getElementById("playBtn"),
+    pause: document.getElementById("pauseBtn"),
+    prev: document.getElementById("prevBtn"),
+    next: document.getElementById("nextBtn"),
+    reset: document.getElementById("resetBtn"),
+    start: document.getElementById("startBtn"),
+    end: document.getElementById("endBtn"),
+    solve: document.getElementById("solveBtn"),
+    random: document.getElementById("randomBtn"),
+  };
+
+  function statusFor(s) {
+    if (noSolutionMsg) return noSolutionMsg;
+    if (s.phase === "solved" && s.step === 0 && s.total === 0) return "Ready — enter a scramble and press SOLVE.";
+    if (s.phase === "solved" && s.step === 0) return "Solved cube — press SOLVE to run the scramble.";
+    if (s.phase === "scramble") return s.playing ? "SCRAMBLING…" : "SCRAMBLED — press SOLVE.";
+    if (s.phase === "solution") return s.playing ? "SOLVING… (optimal IDA* solution)" : "Solution loaded — press PLAY or step with NEXT.";
+    return "✓ SOLVED — optimal solution (" + s.total + " moves).";
+  }
+
+  sim.onStateChange = (s) => {
+    el.stepText.textContent = s.step + "/" + s.total;
+    el.curMove.textContent = s.currentMove ?? "–";
+    el.scrambleText.textContent = s.seq.length
+      ? s.seq.slice(0, s.scrambleLength).join(" ")
+      : "none";
+    el.scrambleText.className = "alg-line" + (s.seq.length ? "" : " empty");
+
+    el.chips.innerHTML = "";
+    s.seq.forEach((m, i) => {
+      const chip = document.createElement("span");
+      chip.className = "chip " + (i < s.scrambleLength ? "scr" : "sol");
+      if (i < s.step) chip.classList.add("done");
+      if (i === s.step - 1 && s.playing) chip.classList.add("now");
+      chip.textContent = m;
+      chip.addEventListener("click", () => sim.goToStep(i + 1));
+      el.chips.appendChild(chip);
+    });
+
+    el.phaseText.textContent =
+      s.phase === "solved" ? "SOLVED" : s.phase === "scramble" ? "SCRAMBLE" : "SOLVING";
+
+    const st = statusFor(s);
+    el.status.textContent = st;
+    el.status.className = "status" + (noSolutionMsg ? " warn" : "") + (s.playing ? " anim" : "");
+
+    const gated = !controlsReady;
+    buttons.prev.disabled = gated || s.step === 0 || s.playing;
+    buttons.next.disabled = gated || s.step >= s.total || s.playing;
+    buttons.reset.disabled = gated || s.step === 0;
+    buttons.start.disabled = gated || s.step === 0;
+    buttons.end.disabled = gated || s.step >= s.total;
+    buttons.play.disabled = gated || s.step >= s.total;
+  };
+
+  el.status.textContent = "Loading 3D engine…";
+  sim.whenReady().then((ok) => {
+    controlsReady = true;
+    if (!ok) { document.getElementById("cdnWarning").classList.add("show"); }
+    sim._emit();
+  }).catch(() => {
+    controlsReady = true;
+  });
+  window.setTimeout(() => {
+    // If the engine never became usable, show the banner instead of a silent blank cube.
+    if (!controlsReady) document.getElementById("cdnWarning").classList.add("show");
+  }, 5000);
+
+  function toMoves(text) {
+    const tokens = text.trim().split(/\s+/).filter(Boolean);
+    for (const t of tokens) {
+      if (!VALID.has(t)) throw new Error("Invalid move: " + t + "  (use U D L R F B with ' or 2).");
+    }
+    return tokens;
+  }
+
+  function showError(msg) {
+    el.errorBox.textContent = msg;
+    el.errorBox.classList.remove("hidden");
+  }
+  function clearError() { el.errorBox.classList.add("hidden"); }
+
+  async function solve() {
+    clearError();
+    noSolutionMsg = null;
+    let moves;
+    try {
+      moves = toMoves(input.value || "");
+    } catch (err) {
+      showError(err.message);
+      return;
+    }
+    buttons.solve.disabled = true;
+    try {
+      const certainScramble = moves.join(" ");
+      const atEnd = sim.getCurrentStep() >= sim.getTotalSteps();
+
+      // Case A — the cube is ALREADY physically showing exactly this scramble
+      // and a matching solution is loaded (prefetched by Random): just RESUME
+      // playback.  The timeline already contains scramble+solution, so nothing
+      // needs rebuilding and no colour flash occurs at this moment.
+      const algoNow = el.algoSelect.value;
+      const resumable =
+        sim.getCurrentStep() === sim.scramble.length &&
+        sim.scramble.join(" ") === certainScramble &&
+        Array.isArray(window._pendingSolve) &&
+        window._pendingSolve[0] === certainScramble &&
+        window._pendingSolve[1] === algoNow &&
+        sim.solution.length > 0;
+
+      // Case B — the cube is already SOLVED for exactly this same scramble and
+      // algorithm: "solve again" is a no-op.  Keep the solved state as-is
+      // (real-life: solving an already-solved cube changes nothing) — no
+      // rebuild, no flash, no re-scramble.
+      const alreadySolved =
+        !resumable &&
+        atEnd &&
+        sim.solution.length > 0 &&
+        sim.scramble.join(" ") === certainScramble &&
+        loadedAlgo === algoNow;
+
+      const data = resumable || alreadySolved
+        ? (Array.isArray(window._pendingSolve) && window._pendingSolve[0] === certainScramble
+            ? window._pendingSolve[2]
+            : null)
+        : await (async () => {
+            const res = await fetch("/solve?scramble=" + encodeURIComponent(certainScramble) + "&algo=" + encodeURIComponent(algoNow));
+            const d = await res.json();
+            if (!res.ok) throw new Error(d.error || "Server error");
+            return d;
+          })();
+
+      if (data) {
+        el.sBfs.textContent = data.bfs_length;
+        el.sLen.textContent = data.found ? data.length : "—";
+        el.sNodes.textContent = Number(data.nodes).toLocaleString("en-US");
+        el.sTime.textContent = data.time_s != null ? (Math.round(data.time_s * 1000)).toLocaleString("en-US") + " ms" : "–";
+        el.sOpt.textContent = data.found ? (data.optimal ? "YES" : "NO") : "—";
+        el.sAlgo.textContent = data.algorithm || ALGO_LABELS[algoNow] || algoNow;
+      }
+
+      if (resumable) {
+        // Continue from the paused scrambled pose straight into the solution.
+        window._pendingSolve = null;
+        sim.play();
+      } else if (!alreadySolved) {
+        // Fresh scramble (typed or different algorithm): build the single
+        // timeline once and animate the whole scramble -> solve continuously.
+        window._pendingSolve = null;
+        loadedAlgo = algoNow;
+        sim.onDone(null);
+        if (data && data.found === false) {
+          const failed = (algoNow || "").toLowerCase();
+          const alternatives = ["physical solver", "Bidirectional", "A*", "Greedy"].filter(
+            (label) => (label === "physical solver" ? "physical" : label).toLowerCase() !== failed
+          );
+          const tip = alternatives.length
+            ? "try " + alternatives.join(", ") + ", or a shorter scramble."
+            : "try a shorter scramble or another algorithm.";
+          noSolutionMsg =
+            "No solution within limits (" + (data.reason || "resource limit reached") + ") — " +
+            (data.nodes != null ? Number(data.nodes).toLocaleString("en-US") : "?") + " nodes, " +
+            (data.time_s != null ? Math.round(data.time_s * 1000) + " ms" : "?") +
+            ". This search honestly exhausted its budget without solving (limits are enforced, " +
+            "nothing is fabricated). The cube is left scrambled — " + tip;
+          el.status.className = "status warn";
+          sim.load(moves, [], moves.length);
+          return;
+        }
+        sim.load(moves, data ? (data.solution ? data.solution.split(" ") : []) : []);
+        sim.playScramble(sim.getTotalSteps());
+      }
+    } catch (err) {
+      showError(err.message || "Solve failed");
+    } finally {
+      buttons.solve.disabled = false;
+    }
+  }
+
+  async function randomScramble() {
+    clearError();
+    noSolutionMsg = null;
+    try {
+      const res = await fetch("/scramble?length=12");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Server error");
+      input.value = data.scramble;
+      pushScrambleToDaa();
+      // Animate the scramble IMMEDIATELY.  The solution is prefetched in the
+      // background (it can take seconds for DAA tree-searches on deep cubes);
+      // the timeline is only extended once the scramble playback has paused.
+      const moves = data.scramble.split(" ");
+      const algo = el.algoSelect.value;
+      sim.onDone(null);
+      sim.load(moves, []);
+      sim.playScramble();
+      window._pendingSolve = null;
+      el.sBfs.textContent = "–";
+      el.sLen.textContent = "–";
+      el.sNodes.textContent = "–";
+      el.sTime.textContent = "–";
+      el.sOpt.textContent = "–";
+      el.sAlgo.textContent = ALGO_LABELS[algo] || algo;
+      fetch("/solve?scramble=" + encodeURIComponent(data.scramble) + "&algo=" + encodeURIComponent(algo))
+        .then((sres) => (sres.ok ? sres.json() : null))
+        .then((sol) => {
+          if (!sol) return;
+          window._pendingSolve = sol.found !== false ? [data.scramble, algo, sol] : null;
+          // The full timeline (scramble + solution) is built only once the
+          // scramble animation has stopped, so the rebuild never interrupts
+          // the cube mid-motion (cubing.js re-renders on alg replacement).
+          if (sol.found !== false && !sim.playing &&
+              sim.getTotalSteps() > 0 && sim.getCurrentStep() >= sim.getTotalSteps()) {
+            sim.load(moves, sol.solution.split(" "), sim.getCurrentStep());
+          }
+          el.sBfs.textContent = sol.bfs_length;
+          el.sLen.textContent = sol.found !== false ? sol.length : "–";
+          el.sNodes.textContent = Number(sol.nodes).toLocaleString("en-US");
+          el.sTime.textContent = sol.time_s != null ? Math.round(sol.time_s * 1000).toLocaleString("en-US") + " ms" : "–";
+          el.sOpt.textContent = sol.found !== false ? (sol.optimal ? "YES" : "NO") : "–";
+          el.sAlgo.textContent = sol.algorithm || ALGO_LABELS[algo] || algo;
+        })
+        .catch(() => {});
+    } catch (err) {
+      showError(err.message || "Scramble fetch failed");
+    }
+  }
+
+  // Every case shown in the input (Random or typed) is mirrored to the DAA
+  // dashboard, which polls /current-scramble and runs its study on the same
+  // scramble. Debounced so fast typing does not spam the server.
+  let daaSyncTimer = null;
+  function pushScrambleToDaa() {
+    const v = input.value.trim();
+    if (!v) return;
+    clearTimeout(daaSyncTimer);
+    daaSyncTimer = setTimeout(() => {
+      fetch("/current-scramble?scramble=" + encodeURIComponent(v), { method: "POST" })
+        .catch(() => {});
+    }, 300);
+  }
+
+  buttons.solve.addEventListener("click", solve);
+  buttons.random.addEventListener("click", randomScramble);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") solve(); });
+  input.addEventListener("input", pushScrambleToDaa);
+  el.algoSelect.addEventListener("change", () => {
+    // Choosing an algorithm runs the solver for the current scramble.
+    if (input.value.trim()) solve();
+  });
+
+  window.__sim = sim; // console/debug + automated CDP verification hook
+  window.pushScrambleToDaa = pushScrambleToDaa; // used by the mode switcher
+
+  buttons.reset.addEventListener("click", () => sim.reset());
+  buttons.start.addEventListener("click", () => sim.goToStep(0));
+  buttons.prev.addEventListener("click", () => sim.previous());
+  buttons.next.addEventListener("click", () => sim.next());
+  buttons.end.addEventListener("click", () => sim.goToStep(sim.getTotalSteps()));
+  buttons.play.addEventListener("click", () => { if (sim.getCurrentStep() >= sim.getTotalSteps()) sim.goToStep(0); sim.play(); });
+  buttons.pause.addEventListener("click", () => sim.pause());
+
+  document.querySelectorAll(".speed button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".speed button").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      sim.setSpeed(parseFloat(btn.dataset.speed));
+    });
+  });
+  }
+
+  window.switchMode = function (mode) {
+    const is3d = mode === "3d";
+    document.getElementById("view3d").classList.toggle("hidden", !is3d);
+    document.getElementById("viewDaa").classList.toggle("hidden", is3d);
+    document.getElementById("mode3d").classList.toggle("active", is3d);
+    document.getElementById("modeDaa").classList.toggle("active", !is3d);
+    document.getElementById("mode3d").setAttribute("aria-selected", String(is3d));
+    document.getElementById("modeDaa").setAttribute("aria-selected", String(!is3d));
+    if (!is3d && document.getElementById("daaFrame").getAttribute("src") === "about:blank") {
+      document.getElementById("daaFrame").src = "http://127.0.0.1:8501";
+    }
+    // Entering DAA mode re-pushes the current case so the study is fresh even
+    // if no Random/typing happened while the view was hidden ("no auto-switch").
+    if (window.pushScrambleToDaa) window.pushScrambleToDaa();
+  };
+</script>
+</body>
+</html>
