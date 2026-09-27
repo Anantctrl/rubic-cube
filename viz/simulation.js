@@ -43,6 +43,8 @@ export class CubeSimulation {
     this._stopAtStep = null;
     this._model = null;
     this._fallbackOnly = false;
+    this._gen = 0;
+    this.animating = false;
     this._emit();
     this.ready = this._initModel();
   }
@@ -88,6 +90,7 @@ export class CubeSimulation {
   }
 
   _setState(step) {
+    this._gen++;
     this.stepIndex = Math.max(0, Math.min(step, this._fullSequence().length));
     this._chain(() => this._scrub());
     this._emit();
@@ -151,7 +154,10 @@ export class CubeSimulation {
   play() {
     if (this.stepIndex >= this._fullSequence().length) return this;
     const self = this;
+    const gen = this._gen;
+    this.animating = true;
     this._chain(async () => {
+      if (gen !== self._gen) { self.animating = false; return; }
       if (self.stepIndex >= self._fullSequence().length) return;
       if (self._fallbackOnly) { self._startFallback(); return; }
       try {
@@ -162,6 +168,13 @@ export class CubeSimulation {
         // paused label ("press SOLVE…") that invites a redundant Solve press.
         self._emit();
         await self._playTimeline();
+        if (gen !== self._gen) {
+          // A pause()/load()/reset() landed while the timeline was starting;
+          // drop this stale playback instead of animating a dead sequence.
+          self.playing = false;
+          self.animating = false;
+          return;
+        }
         self._startPoll();
         self._startSafety();
       } catch (_) { self.playing = false; }
@@ -171,7 +184,9 @@ export class CubeSimulation {
   }
 
   pause() {
+    this._gen++;
     this.playing = false;
+    this.animating = false;
     if (!this._fallbackOnly) {
       try { this.player.pause(); } catch (_) {}
       try { this._model.playingInfo.set({ playing: false }); } catch (_) {}
@@ -236,6 +251,7 @@ export class CubeSimulation {
   getCurrentMove() { return this.currentMove(); }
   getCurrentStep() { return this.stepIndex; }
   getTotalSteps() { return this._fullSequence().length; }
+  isAnimating() { return this.animating || this.playing; }
 
   // Callbacks fire once after a completed play/playScramble/playSolution
   // animation (used to chain "scramble -> then solve" without cooking
@@ -286,40 +302,70 @@ export class CubeSimulation {
   async _poll() {
     if (!this.playing || this._fallbackOnly) return;
     try {
-      const info = await this._model.coarseTimelineInfo.get();
-      if (!info.playing) {
-        const end = await this._model.detailedTimelineInfo.get();
-        if (end.atEnd || this.stepIndex >= this._fullSequence().length) {
-          this._playingEnded();
+      // NOTE: detailedTimelineInfo has NO ``playing`` field (that is only on
+      // coarseTimelineInfo).  Everything here is derived from the timestamp +
+      // atStart/atEnd + timeRange, so playback progress is tracked even when
+      // the model omits the flag.
+      const dtl = await this._model.detailedTimelineInfo.get();
+      const { start, end } = dtl.timeRange || { start: 0, end: 0 };
+      const total = this._fullSequence().length;
+      const ts = dtl.timestamp ?? 0;
+
+      // Live step tracking: while the cubing timeline animates, advance the
+      // wrapper's stepIndex from the timestamp fraction so the counter/chips
+      // move in real time instead of freezing at the last scrubbed pose
+      // (the "cube lags / nothing happens" look).
+      if (total > 0 && end > start) {
+        const frac = Math.min(1, Math.max(0, (ts - start) / (end - start)));
+        const liveStep = Math.round(frac * total);
+        if (liveStep !== this.stepIndex) {
+          this.stepIndex = liveStep;
+          this._emit();
         }
-      } else if (this._stopAtStep !== null) {
-        // We want playback to stop mid-timeline (end of the scramble phase)
-        // so the cube stays scrambled and waits for the user.  Convert the
-        // target step to a timestamp fraction and pause when reached.
-        const dtl = await this._model.detailedTimelineInfo.get();
-        const { start, end } = dtl.timeRange || { start: 0, end: 0 };
-        const total = this._fullSequence().length;
-        if (total > 0 && end > start) {
-          const targetTs = start + (end - start) * (this._stopAtStep / total);
-          if ((dtl.timestamp ?? 0) >= targetTs) {
-            const stop = this._stopAtStep;
-            this._stopAtStep = null;
-            this.pause();
-            this._setState(stop);
-          }
+      }
+
+      // Stop-at-step (e.g. end of the scramble phase): pause when the target
+      // timestamp is reached so the cube stays scrambled and waits for the user.
+      // The playScramble animation is considered complete here, so the pending
+      // onDone continuations (a deferred Solve attach, Random's late solution
+      // attach) must run exactly as if the timeline had ended naturally --
+      // otherwise a Solve pressed mid-scramble is silently dropped.
+      if (this._stopAtStep !== null && total > 0 && end > start) {
+        const targetTs = start + (end - start) * (this._stopAtStep / total);
+        if (ts >= targetTs) {
+          const stop = this._stopAtStep;
+          this._stopAtStep = null;
+          this.pause();
+          this._setState(stop);
+          this._fireAfterPlaying();
         }
+        return;
+      }
+
+      // Natural end: the timestamp reached (or passed) the timeline end.
+      if (dtl.atEnd || (end > start && ts >= end) || this.stepIndex >= total) {
+        this._playingEnded();
       }
     } catch (_) {}
   }
 
   _playingEnded() {
+    this._gen++;
     this.playing = false;
+    this.animating = false;
+    this._stopAtStep = null;
     this.stepIndex = this._fullSequence().length;
     this._stopPoll();
     this._stopSafety();
+    this._emit();
+    this._fireAfterPlaying();
+  }
+
+  // Run all queued playback-end continuations once.  Used both at the natural
+  // timeline end and at the stop-at-step pause (the end of a playScramble).
+  _fireAfterPlaying() {
     const cbs = this._afterPlaying || [];
     this._afterPlaying = [];
-    this._emit();
     for (const cb of cbs) {
       try { cb.call(this); } catch (_) {}
     }
@@ -342,10 +388,12 @@ export class CubeSimulation {
   _startSafety() {
     this._stopSafety();
     const total = this._fullSequence().length;
-    const expect = (total - this.stepIndex) * 650 / this.speed + 2000;
+    // Measured ~725ms/move at 1x (cubing.js can run slower under load); keep a
+    // generous ceiling so the make-shift "physics rate" never fires mid-solve.
+    const expect = (total - this.stepIndex) * 900 / this.speed + 3500;
     this._safetyTimer = setTimeout(() => {
       if (this.playing) { this._playingEnded(); }
-    }, Math.max(500, expect));
+    }, Math.max(800, expect));
   }
 
   _stopSafety() { if (this._safetyTimer) { clearTimeout(this._safetyTimer); this._safetyTimer = null; } }

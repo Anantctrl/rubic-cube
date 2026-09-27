@@ -202,6 +202,7 @@
   let loadedAlgo = "physical"; // algorithm that produced the loaded solution
   let noSolutionMsg = null;    // honest "algorithm hit its limits" notice
   let solveDeferred = false;   // a mid-scramble Solve is queued (attached at scramble end)
+  let solveRunning = false;    // synchronous re-entry guard for solve()
 
   const el = {
     scrambleText: document.getElementById("scrambleText"),
@@ -325,12 +326,15 @@
   function clearError() { el.errorBox.classList.add("hidden"); }
 
   async function solve() {
+    if (solveRunning) return; // drop double-click/Enter/algo-change re-entries
+    solveRunning = true;
     clearError();
     noSolutionMsg = null;
     let moves;
     try {
       moves = toMoves(input.value || "");
     } catch (err) {
+      solveRunning = false;
       showError(err.message);
       return;
     }
@@ -473,13 +477,21 @@
         }
         const attachAndSolve = () => {
           solveDeferred = false;
-          sim.pause();
+          // Idempotent: bail if a playback started meanwhile or the pose moved
+          // off the scrambled-pose seam (a stale continuation must never
+          // rebuild the timeline mid-motion — that is the reset+re-scramble bug).
+          if (sim.playing) return;
+          if (sim.getCurrentStep() !== sim.scramble.length) return;
           if (sim.solution.length === 0) {
             sim.load(sim.scramble, solMoves, sim.getCurrentStep());
           }
           sim.playSolution();
         };
-        if (sim.playing) {
+        // Never attach while the scramble is animating (or even merely queued —
+        // right after Random the ``playing`` flag may not have flipped yet).
+        // Defer to the playback end; play() now flags ``animating`` synchronously
+        // so this check catches the queued-but-not-yet-playing window.
+        if (sim.isAnimating()) {
           solveDeferred = true;
           sim.onDone(attachAndSolve);
         } else {
@@ -516,6 +528,7 @@
       showError(err.message || "Solve failed");
     } finally {
       buttons.solve.disabled = false;
+      solveRunning = false;
     }
   }
 
@@ -560,10 +573,12 @@
             // The solution landed while the scramble is still animating: do NOT
             // rebuild mid-motion.  Attach it quietly once the scramble playback
             // ends, so Solve can later just resume from the scrambled pose with
-            // no re-scramble and no flash.
+            // no re-scramble and no flash.  No pause() here — pausing could
+            // kill a solution playback that is starting at the same instant.
             sim.onDone(() => {
-              sim.pause();
-              if (sim.solution.length === 0) {
+              if (!sim.playing &&
+                  sim.getCurrentStep() === sim.scramble.length &&
+                  sim.solution.length === 0) {
                 sim.load(sim.scramble, sol.solution.split(" "), sim.getCurrentStep());
               }
             });
